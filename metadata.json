@@ -1,0 +1,6 @@
+{
+  "name": "فروشگاه لواشک ملس‌بان",
+  "description": "فروشگاه آنلاین و تخصصی انواع لواشک طبیعی و ملس، فروش خرده و ثبت سفارش عمده با ارسال سراسری",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
