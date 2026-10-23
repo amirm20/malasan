@@ -68,7 +68,7 @@ ON DUPLICATE KEY UPDATE
 
 -- 2. Seed Users (Single Source of Truth: role)
 INSERT INTO users (id, name, family, email, mobile, password_hash, salt, role, permissions, is_active, created_at, updated_at)
-VALUES ('usr-admin-01', 'مدیر', 'سیستم ملس‌بان', 'admin@malasban.ir', '09120000000', 'ef96a059b67e06017c7d02354adb04d054a3ec7bd77fdeea733b3c7ff47d3c583f552b2cf803523f40f0dfb782b782a313c0d18c975331aa30b0d9e986578769', 'f72faa39602db30068053a3481405e4d', 'SuperAdmin', '["overview","products","orders","wholesale","reviews","categories","coupons","customers","staff","blog","settings","chat"]', TRUE, '2026-01-01T08:00:00.000Z', '2026-01-01T08:00:00.000Z')
+VALUES ('usr-admin-01', 'مدیر', 'سیستم ملس‌بان', 'admin@malasban.ir', '09120000000', 'ef96a059b67e06017c7d02354adb04d054a3ec7bd77fdeea733b3c7ff47d3c583f552b2cf803523f40f0dfb782b782a313c0d18c975331aa30b0d9e986578769', 'f72faa39602db30068053a3481405e4d', 'SuperAdmin', '["overview","products","orders","wholesale","reviews","categories","coupons","customers","staff","blog","settings","chat"]', FALSE, '2026-01-01T08:00:00.000Z', '2026-01-01T08:00:00.000Z')
 ON DUPLICATE KEY UPDATE
   name = VALUES(),
   family = VALUES(),
@@ -81,7 +81,7 @@ ON DUPLICATE KEY UPDATE
   is_active = VALUES();
 
 INSERT INTO users (id, name, family, email, mobile, password_hash, salt, role, permissions, is_active, created_at, updated_at)
-VALUES ('usr-demo-02', 'سهراب', 'سپهری', 'user@malasban.ir', '09123456789', 'd0b73997434b77b613c6525234fdc1c54a12e5cd8540205e8d05fd1c6627dd5826dddbe951a9eee126c0d61b25e39ec239c652d0225c0403e69ef782347f24e6', 'f685cfc63148532f59bcc34d6c34df6a', 'Customer', '[]', TRUE, '2026-02-15T10:30:00.000Z', '2026-02-15T10:30:00.000Z')
+VALUES ('usr-demo-02', 'سهراب', 'سپهری', 'user@malasban.ir', '09123456789', 'd0b73997434b77b613c6525234fdc1c54a12e5cd8540205e8d05fd1c6627dd5826dddbe951a9eee126c0d61b25e39ec239c652d0225c0403e69ef782347f24e6', 'f685cfc63148532f59bcc34d6c34df6a', 'Customer', '[]', FALSE, '2026-02-15T10:30:00.000Z', '2026-02-15T10:30:00.000Z')
 ON DUPLICATE KEY UPDATE
   name = VALUES(),
   family = VALUES(),
@@ -94,7 +94,7 @@ ON DUPLICATE KEY UPDATE
   is_active = VALUES();
 
 INSERT INTO users (id, name, family, email, mobile, password_hash, salt, role, permissions, is_active, created_at, updated_at)
-VALUES ('usr-staff-01', 'علیرضا', 'صادقی (کارشناس فروش و انبار)', 'staff@malasban.ir', '09121112233', '0391ce35c7fcdf3c4e3c19615a9b096dbc07cd1a56185b5ffc46cfefb5fc8d9e16a3af60447aa9edd0c3b1ee1299d97f3cc69b5e7e0eb7318724fdb655d45a1a', 'ffbd6ae189da7769d6cc371cbc6002ed', 'Admin', '["overview","products","orders","wholesale","reviews"]', TRUE, '2026-02-01T09:00:00.000Z', '2026-02-01T09:00:00.000Z')
+VALUES ('usr-staff-01', 'علیرضا', 'صادقی (کارشناس فروش و انبار)', 'staff@malasban.ir', '09121112233', '0391ce35c7fcdf3c4e3c19615a9b096dbc07cd1a56185b5ffc46cfefb5fc8d9e16a3af60447aa9edd0c3b1ee1299d97f3cc69b5e7e0eb7318724fdb655d45a1a', 'ffbd6ae189da7769d6cc371cbc6002ed', 'Admin', '["overview","products","orders","wholesale","reviews"]', FALSE, '2026-02-01T09:00:00.000Z', '2026-02-01T09:00:00.000Z')
 ON DUPLICATE KEY UPDATE
   name = VALUES(),
   family = VALUES(),
@@ -107,7 +107,7 @@ ON DUPLICATE KEY UPDATE
   is_active = VALUES();
 
 INSERT INTO users (id, name, family, email, mobile, password_hash, salt, role, permissions, is_active, created_at, updated_at)
-VALUES ('usr-customer-01', 'فاطمه', 'موسوی', 'fatemeh@example.com', '09123456780', 'd0b73997434b77b613c6525234fdc1c54a12e5cd8540205e8d05fd1c6627dd5826dddbe951a9eee126c0d61b25e39ec239c652d0225c0403e69ef782347f24e6', 'f685cfc63148532f59bcc34d6c34df6a', 'Customer', '[]', TRUE, '2026-02-20T11:00:00.000Z', '2026-02-20T11:00:00.000Z')
+VALUES ('usr-customer-01', 'فاطمه', 'موسوی', 'fatemeh@example.com', '09123456780', 'd0b73997434b77b613c6525234fdc1c54a12e5cd8540205e8d05fd1c6627dd5826dddbe951a9eee126c0d61b25e39ec239c652d0225c0403e69ef782347f24e6', 'f685cfc63148532f59bcc34d6c34df6a', 'Customer', '[]', FALSE, '2026-02-20T11:00:00.000Z', '2026-02-20T11:00:00.000Z')
 ON DUPLICATE KEY UPDATE
   name = VALUES(),
   family = VALUES(),

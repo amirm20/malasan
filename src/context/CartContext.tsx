@@ -128,11 +128,7 @@ export const CartProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const applyCoupon = async (code: string): Promise<boolean> => {
     try {
-      const token = localStorage.getItem('malasban_token');
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
-      }
       const res = await fetch('/api/coupons/validate', {
         method: 'POST',
         headers,

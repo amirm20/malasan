@@ -38,6 +38,10 @@ export async function syncSchemaToPostgres(data: DatabaseSchema): Promise<{ succ
   try {
     client = await p.connect();
     await client.query('BEGIN');
+    // Serialize snapshot writes. This legacy cache-sync architecture must run as
+    // a single application instance; direct SQL repositories are needed to scale.
+
+    await client.query('SELECT pg_advisory_xact_lock(72419031)');
 
     // 1. Categories
     for (const c of data.categories) {
@@ -201,12 +205,13 @@ export async function syncSchemaToPostgres(data: DatabaseSchema): Promise<{ succ
     // 6. Orders (Without items JSONB, with coupon_id FK)
     for (const o of data.orders) {
       await client.query(
-        `INSERT INTO orders (id, order_number, user_id, customer_name, customer_mobile, customer_email, shipping_address, shipping_method, shipping_fee, subtotal, discount_amount, coupon_id, coupon_code, total_amount, status, payment_status, payment_method, payment_ref_id, customer_notes, admin_notes, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+        `INSERT INTO orders (id, order_number, user_id, customer_name, customer_mobile, customer_email, shipping_address, shipping_method, shipping_fee, subtotal, discount_amount, coupon_id, coupon_code, total_amount, status, payment_status, payment_method, payment_ref_id, payment_authority, customer_notes, admin_notes, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
          ON CONFLICT (id) DO UPDATE SET
            coupon_id = EXCLUDED.coupon_id,
            status = EXCLUDED.status,
            payment_status = EXCLUDED.payment_status,
+           payment_authority = EXCLUDED.payment_authority,
            updated_at = EXCLUDED.updated_at`,
         [
           o.id,
@@ -227,6 +232,7 @@ export async function syncSchemaToPostgres(data: DatabaseSchema): Promise<{ succ
           o.paymentStatus,
           o.paymentMethod,
           o.paymentRefId || null,
+          o.paymentAuthority || null,
           o.customerNotes || null,
           o.adminNotes || null,
           o.createdAt,
@@ -555,6 +561,36 @@ export async function syncSchemaToPostgres(data: DatabaseSchema): Promise<{ succ
         );
       }
     }
+
+    // Reconcile deletions from the single-instance in-memory cache.
+    // The cache is hydrated from PostgreSQL before serving requests.
+    const orderIds = data.orders.map((x) => x.id);
+    const orderItemIds = data.orders.flatMap((x) => (x.items || []).map((item) => item.id));
+    const userIds = data.users.map((x) => x.id);
+    const addressIds = data.users.flatMap((x) => (x.addresses || []).map((a) => a.id));
+    const productIds = data.products.map((x) => x.id);
+    const categoryIds = data.categories.map((x) => x.id);
+    const couponIds = data.coupons.map((x) => x.id);
+    const wholesaleIds = data.wholesaleRequests.map((x) => x.id);
+    const reviewIds = data.reviews.map((x) => x.id);
+    const blogIds = data.blogPosts.map((x) => x.id);
+    const conversationIds = data.chatConversations.map((x) => x.id);
+    const messageIds = data.chatMessages.map((x) => x.id);
+    const cannedResponseIds = data.cannedResponses.map((x) => x.id);
+
+    await client.query('DELETE FROM order_items WHERE NOT (id = ANY($1::varchar[]))', [orderItemIds]);
+    await client.query('DELETE FROM chat_messages WHERE NOT (id = ANY($1::varchar[]))', [messageIds]);
+    await client.query('DELETE FROM addresses WHERE NOT (id = ANY($1::varchar[]))', [addressIds]);
+    await client.query('DELETE FROM reviews WHERE NOT (id = ANY($1::varchar[]))', [reviewIds]);
+    await client.query('DELETE FROM wholesale_requests WHERE NOT (id = ANY($1::varchar[]))', [wholesaleIds]);
+    await client.query('DELETE FROM chat_conversations WHERE NOT (id = ANY($1::varchar[]))', [conversationIds]);
+    await client.query('DELETE FROM canned_responses WHERE NOT (id = ANY($1::varchar[]))', [cannedResponseIds]);
+    await client.query('DELETE FROM orders WHERE NOT (id = ANY($1::varchar[]))', [orderIds]);
+    await client.query('DELETE FROM coupons WHERE NOT (id = ANY($1::varchar[]))', [couponIds]);
+    await client.query('DELETE FROM products WHERE NOT (id = ANY($1::varchar[]))', [productIds]);
+    await client.query('DELETE FROM blog_posts WHERE NOT (id = ANY($1::varchar[]))', [blogIds]);
+    await client.query('DELETE FROM categories WHERE NOT (id = ANY($1::varchar[]))', [categoryIds]);
+    await client.query('DELETE FROM users WHERE NOT (id = ANY($1::varchar[]))', [userIds]);
 
     await client.query('COMMIT');
     return { success: true };

@@ -13,7 +13,8 @@
     "db:seed": "tsx server/infrastructure/dbMigrator.ts seed",
     "db:init": "tsx server/infrastructure/dbMigrator.ts init",
     "db:status": "tsx server/infrastructure/dbMigrator.ts status",
-    "db:audit": "tsx scripts/audit_database.ts"
+    "db:audit": "tsx scripts/audit_database.ts",
+    "db:bootstrap-admin": "tsx scripts/bootstrap_admin.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

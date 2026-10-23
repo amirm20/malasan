@@ -127,17 +127,10 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const updateSettings = async (newSettings: Partial<SiteSetting>, customToken?: string): Promise<boolean> => {
     try {
-      const token =
-        customToken ||
-        localStorage.getItem('malasban_token') ||
-        localStorage.getItem('token') ||
-        localStorage.getItem('adminToken');
-
       const res = await fetch('/api/settings', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify(newSettings),
       });

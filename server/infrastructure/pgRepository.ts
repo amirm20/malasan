@@ -495,7 +495,7 @@ export const pgProductsRepository = {
       FROM products p
       LEFT JOIN categories c ON p.category_id = c.id
       ${whereClause}
-      ORDER BY p.display_order ASC, p.created_at DESC
+      ORDER BY c.display_order ASC, p.created_at DESC
     `;
 
     const res = await p.query(query, values);
@@ -672,11 +672,12 @@ export const pgOrdersRepository = {
         id: item.id,
         productId: item.product_id,
         productName: item.product_name,
-        unitPrice: Number(item.price),
+        sku: item.sku || undefined,
+        unitPrice: Number(item.unit_price),
         quantity: Number(item.quantity),
         totalPrice: Number(item.total_price),
         productImage: item.product_image || '',
-        weightGrams: 300,
+        weightGrams: Number(item.weight_grams || 0),
       });
       itemsMap.set(item.order_id, list);
     }
@@ -694,7 +695,7 @@ export const pgOrdersRepository = {
       id: item.id,
       productId: item.product_id,
       productName: item.product_name,
-      unitPrice: Number(item.price),
+      unitPrice: Number(item.unit_price),
       quantity: Number(item.quantity),
       totalPrice: Number(item.total_price),
       productImage: item.product_image || '',
@@ -713,9 +714,13 @@ export const pgOrdersRepository = {
       await client.query(
         `INSERT INTO orders (
           id, order_number, user_id, customer_name, customer_mobile, customer_email,
-          address, postal_code, province, city, status, payment_status,
-          total_amount, shipping_fee, discount_amount, coupon_id, notes, shipping_method, tracking_code, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`,
+          shipping_address, shipping_method, shipping_fee, subtotal, discount_amount,
+          coupon_id, coupon_code, total_amount, status, payment_status, payment_method,
+          payment_ref_id, payment_authority, customer_notes, admin_notes, created_at, updated_at
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13,
+          $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
+        )`,
         [
           order.id,
           order.orderNumber,
@@ -723,38 +728,41 @@ export const pgOrdersRepository = {
           order.customerName,
           order.customerMobile,
           order.customerEmail || null,
-          order.shippingAddress.fullAddress,
-          order.shippingAddress.postalCode,
-          order.shippingAddress.province,
-          order.shippingAddress.city,
-          order.status || 'Pending',
-          order.paymentStatus || 'Pending',
-          order.totalAmount,
+          JSON.stringify(order.shippingAddress),
+          order.shippingMethod,
           order.shippingFee || 0,
+          order.subtotal,
           order.discountAmount || 0,
           order.couponId || null,
-          order.customerNotes || null,
-          order.shippingMethod || 'پست پیشتاز',
+          order.couponCode || null,
+          order.totalAmount,
+          order.status || 'Pending',
+          order.paymentStatus || 'Pending',
+          order.paymentMethod,
           order.paymentRefId || null,
+          order.paymentAuthority || null,
+          order.customerNotes || null,
+          order.adminNotes || null,
           order.createdAt || new Date().toISOString(),
           order.updatedAt || new Date().toISOString(),
         ]
       );
-
       for (const item of items) {
         await client.query(
-          `INSERT INTO order_items (id, order_id, product_id, product_name, price, quantity, total_price, product_image, product_slug)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          `INSERT INTO order_items (id, order_id, product_id, product_name, sku, product_image, weight_grams, quantity, unit_price, discount_amount, total_price)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
           [
             item.id,
             order.id,
             item.productId,
             item.productName,
-            item.unitPrice,
-            item.quantity,
-            item.totalPrice,
+            item.sku || null,
             item.productImage || null,
-            item.sku || 'lavashak',
+            item.weightGrams || null,
+            item.quantity,
+            item.unitPrice,
+            item.discountAmount || 0,
+            item.totalPrice,
           ]
         );
 
@@ -786,7 +794,7 @@ export const pgOrdersRepository = {
   async updateStatus(id: string, status: OrderStatus, adminNotes?: string): Promise<boolean> {
     const p = getPgPool();
     const query = adminNotes !== undefined
-      ? `UPDATE orders SET status = $1, notes = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3`
+      ? `UPDATE orders SET status = $1, admin_notes = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3`
       : `UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`;
     const params = adminNotes !== undefined ? [status, adminNotes, id] : [status, id];
     const res = await p.query(query, params);
@@ -796,7 +804,7 @@ export const pgOrdersRepository = {
   async updatePayment(id: string, paymentStatus: PaymentStatus, refId?: string): Promise<boolean> {
     const p = getPgPool();
     const res = await p.query(
-      `UPDATE orders SET payment_status = $1, tracking_code = COALESCE($2, tracking_code), updated_at = CURRENT_TIMESTAMP WHERE id = $3`,
+      `UPDATE orders SET payment_status = $1, payment_ref_id = COALESCE($2, payment_ref_id), updated_at = CURRENT_TIMESTAMP WHERE id = $3`,
       [paymentStatus, refId || null, id]
     );
     return (res.rowCount || 0) > 0;
@@ -809,6 +817,9 @@ export const pgOrdersRepository = {
   },
 
   mapRowToOrder(o: any, items: OrderItem[]): Order {
+    const address = typeof o.shipping_address === 'string'
+      ? JSON.parse(o.shipping_address)
+      : (o.shipping_address || {});
     return {
       id: o.id,
       orderNumber: o.order_number,
@@ -817,27 +828,29 @@ export const pgOrdersRepository = {
       customerMobile: o.customer_mobile,
       customerEmail: o.customer_email || undefined,
       shippingAddress: {
-        id: `addr-${o.id}`,
-        title: 'آدرس ثبت شده سفارش',
-        receiverName: o.customer_name,
-        receiverMobile: o.customer_mobile,
-        province: o.province || 'تهران',
-        city: o.city || 'تهران',
-        fullAddress: o.address || '',
-        postalCode: o.postal_code || '',
-        isDefault: true,
+        id: address.id || `addr-${o.id}`,
+        title: address.title || 'آدرس ثبت شده سفارش',
+        receiverName: address.receiverName || address.receiver_name || o.customer_name,
+        receiverMobile: address.receiverMobile || address.receiver_mobile || o.customer_mobile,
+        province: address.province || 'تهران',
+        city: address.city || 'تهران',
+        fullAddress: address.fullAddress || address.address || '',
+        postalCode: address.postalCode || address.postal_code || '',
+        isDefault: Boolean(address.isDefault ?? address.is_default),
       },
       shippingMethod: o.shipping_method || 'پست پیشتاز',
       shippingFee: Number(o.shipping_fee || 0),
       items,
-      subtotal: Number(o.total_amount) + Number(o.discount_amount || 0) - Number(o.shipping_fee || 0),
+      subtotal: Number(o.subtotal ?? (Number(o.total_amount) + Number(o.discount_amount || 0) - Number(o.shipping_fee || 0))),
       discountAmount: Number(o.discount_amount || 0),
       couponId: o.coupon_id || undefined,
+      couponCode: o.coupon_code || undefined,
       totalAmount: Number(o.total_amount),
       status: o.status as OrderStatus,
       paymentStatus: o.payment_status as PaymentStatus,
       paymentMethod: 'درگاه بانکی شاپرک',
-      paymentRefId: o.tracking_code || undefined,
+      paymentRefId: o.payment_ref_id || undefined,
+      paymentAuthority: o.payment_authority || undefined,
       customerNotes: o.notes || undefined,
       createdAt: o.created_at?.toISOString ? o.created_at.toISOString() : String(o.created_at),
       updatedAt: o.updated_at?.toISOString ? o.updated_at.toISOString() : String(o.updated_at),

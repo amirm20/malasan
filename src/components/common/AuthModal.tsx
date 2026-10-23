@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { X, Lock, Mail, Phone, User as UserIcon, ShieldAlert, Sparkles } from 'lucide-react';
+import { X, Lock, Mail, Phone, User as UserIcon, ShieldAlert } from 'lucide-react';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -42,17 +42,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, defaultTa
     if (ok) onClose();
   };
 
-  const prefillAdmin = () => {
-    setTab('login');
-    setIdentifier('admin@malasban.ir');
-    setPassword('Admin@123456');
-  };
-
-  const prefillCustomer = () => {
-    setTab('login');
-    setIdentifier('user@malasban.ir');
-    setPassword('user123');
-  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in">
@@ -79,30 +68,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, defaultTa
           <p className="text-xs text-stone-500 mt-1">
             برای ثبت و پیگیری سریع سفارش‌ها، دسترسی به تخفیف‌های ویژه و سبد خرید
           </p>
-        </div>
-
-        {/* Demo Fast Login Pills */}
-        <div className="bg-amber-50/80 border border-amber-200/80 rounded-2xl p-3 mb-5">
-          <div className="flex items-center gap-1.5 text-xs font-bold text-amber-900 mb-2">
-            <Sparkles className="w-3.5 h-3.5 text-amber-700" />
-            <span>حساب‌های پیش‌فرض تست سریع:</span>
-          </div>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={prefillAdmin}
-              className="flex-1 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold py-1.5 px-2 rounded-lg transition-colors shadow-xs"
-            >
-              مدیر سایت (Admin)
-            </button>
-            <button
-              type="button"
-              onClick={prefillCustomer}
-              className="flex-1 bg-white hover:bg-amber-100 text-amber-900 border border-amber-300 text-xs font-bold py-1.5 px-2 rounded-lg transition-colors shadow-xs"
-            >
-              مشتری نمونه (User)
-            </button>
-          </div>
         </div>
 
         {/* Tabs */}
@@ -142,7 +107,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, defaultTa
                   required
                   value={identifier}
                   onChange={(e) => setIdentifier(e.target.value)}
-                  placeholder="09123456789 یا admin@malasban.ir"
+                  placeholder="شماره موبایل یا ایمیل"
                   className="w-full pl-4 pr-10 py-2.5 text-sm bg-stone-50 border border-stone-200 rounded-xl focus:bg-white focus:border-rose-800 focus:ring-1 focus:ring-rose-800 outline-hidden transition-all text-left dir-ltr"
                 />
                 <Mail className="w-4 h-4 text-stone-400 absolute right-3 top-3.5" />

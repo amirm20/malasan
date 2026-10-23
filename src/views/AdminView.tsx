@@ -69,7 +69,7 @@ interface AdminViewProps {
 }
 
 export const AdminView: React.FC<AdminViewProps> = ({ onNavigate, initialTab }) => {
-  const { user, token, isAdmin, isSuperAdmin, hasPermission, login } = useAuth();
+  const { user, token, isAdmin, isSuperAdmin, hasPermission } = useAuth();
   const { showToast } = useToast();
 
   const [activeTab, setActiveTab] = useState<
@@ -2236,21 +2236,9 @@ export const AdminView: React.FC<AdminViewProps> = ({ onNavigate, initialTab }) 
           <div className="flex items-center gap-2.5">
             <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0" />
             <p className="text-xs font-bold">
-              برای اعمال تغییرات و ذخیره‌سازی قطعی در سیستم، لطفاً وارد حساب مدیریت ملس‌بان شوید.
+              برای اعمال تغییرات، با حساب مدیریتی مجاز وارد شوید.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={async () => {
-              const ok = await login('admin@malasban.ir', 'Admin@123456');
-              if (ok) {
-                showToast('با موفقیت به عنوان مدیر ملس‌بان وارد شدید.', 'success');
-              }
-            }}
-            className="bg-amber-500 hover:bg-amber-600 text-stone-950 font-black text-xs px-4 py-2 rounded-xl transition-colors shrink-0 shadow-xs cursor-pointer"
-          >
-            ورود فوری با حساب مدیر (Admin)
-          </button>
         </div>
       )}
 

@@ -25,7 +25,7 @@ BEGIN
       'schema_migrations', 'users', 'addresses', 'categories', 'products',
       'coupons', 'orders', 'order_items', 'wholesale_requests', 'reviews',
       'blog_posts', 'site_settings', 'chat_conversations', 'chat_messages',
-      'chat_settings', 'canned_responses'
+      'chat_settings', 'canned_responses', 'user_sessions'
     ])
   LOOP
     v_check_count := v_check_count + 1;
@@ -37,7 +37,7 @@ BEGIN
       v_err_count := v_err_count + 1;
     END IF;
   END LOOP;
-  RAISE NOTICE '✓ Checked 16 expected tables.';
+  RAISE NOTICE '✓ Checked 17 expected tables.';
 
   -- 2. Verify orders.coupon_id exists and has foreign key to coupons(id)
   v_check_count := v_check_count + 1;
@@ -64,7 +64,19 @@ BEGIN
     END IF;
   END IF;
 
-  -- 3. Verify partial unique index on addresses(user_id) WHERE is_default = TRUE
+  -- 3. Verify payment authority is persisted to prevent cross-order/replayed verification
+  v_check_count := v_check_count + 1;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'orders' AND column_name = 'payment_authority'
+  ) THEN
+    RAISE WARNING 'MISSING COLUMN: orders.payment_authority';
+    v_err_count := v_err_count + 1;
+  ELSE
+    RAISE NOTICE '✓ Verified orders.payment_authority column.';
+  END IF;
+
+  -- 4. Verify partial unique index on addresses(user_id) WHERE is_default = TRUE
   v_check_count := v_check_count + 1;
   IF NOT EXISTS (
     SELECT 1 FROM pg_indexes
@@ -86,7 +98,7 @@ BEGIN
     END IF;
   END IF;
 
-  -- 4. Verify canned_responses.shortcut uniqueness
+  -- 5. Verify canned_responses.shortcut uniqueness
   v_check_count := v_check_count + 1;
   SELECT COUNT(*) INTO v_count
   FROM (

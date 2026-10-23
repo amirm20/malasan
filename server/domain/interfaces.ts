@@ -23,6 +23,7 @@ export interface PaymentRequestResult {
 export interface PaymentVerifyParams {
   authority: string;
   amountTomans: number;
+  status?: 'OK' | 'NOK';
 }
 
 export interface PaymentVerifyResult {

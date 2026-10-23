@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Runtime data must live in PostgreSQL, never in checked-in JSON files.
+data/*.json

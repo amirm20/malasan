@@ -21,7 +21,7 @@ import {
   ChatProductAttachment,
   ChatOrderAttachment,
 } from '../domain/models.js';
-import { hashPassword, verifyPassword, generateToken } from '../infrastructure/auth.js';
+import { hashPassword, verifyPassword } from '../infrastructure/auth.js';
 
 export class ProductService {
   static getAll(filters?: {

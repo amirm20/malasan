@@ -44,10 +44,22 @@ export function getDbConfig(): DbConfig {
 
 export function createPgPool(): pg.Pool {
   const config = getDbConfig();
+  if (process.env.NODE_ENV === 'production') {
+    const explicitHost = process.env.PGHOST || process.env.DB_HOST || process.env.SQL_HOST;
+    const explicitPassword = process.env.PGPASSWORD || process.env.DB_PASSWORD || process.env.SQL_PASSWORD;
+    const explicitDatabase = process.env.PGDATABASE || process.env.DB_NAME || process.env.SQL_DB_NAME;
+    const explicitUser = process.env.PGUSER || process.env.DB_USER || process.env.SQL_USER;
+    if (!config.connectionString && !(explicitHost && explicitPassword && explicitDatabase && explicitUser)) {
+      throw new Error('Configure DATABASE_URL or explicit PostgreSQL host, database, user, and password in production.');
+    }
+    if (config.connectionString && !['localhost', '127.0.0.1', '[::1]'].some((host) => config.connectionString!.includes(host)) && process.env.DB_SSL !== 'true') {
+      throw new Error('Set DB_SSL=true for remote PostgreSQL connections in production.');
+    }
+  }
   if (config.connectionString) {
     return new Pool({
       connectionString: config.connectionString,
-      ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+      ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
     });
   }
   return new Pool({
@@ -56,7 +68,7 @@ export function createPgPool(): pg.Pool {
     database: config.database,
     user: config.user,
     password: config.password,
-    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
   });
 }
 

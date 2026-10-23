@@ -69,6 +69,11 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({ onNavigate }) => {
 
   const handlePlaceOrder = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!user) {
+      showToast('برای ثبت سفارش ابتدا وارد حساب کاربری خود شوید.', 'error');
+      onNavigate('account');
+      return;
+    }
     if (!receiverName.trim() || !receiverMobile.trim() || !fullAddress.trim()) {
       showToast('لطفاً مشخصات تحویل‌گیرنده و آدرس را کامل وارد کنید.', 'error');
       return;
@@ -115,6 +120,7 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({ onNavigate }) => {
 
       const res = await fetch('/api/orders', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(orderPayload),
       });

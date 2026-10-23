@@ -19,37 +19,29 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem('malasban_token'));
+  const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const { showToast } = useToast();
 
   useEffect(() => {
-    if (token) {
-      fetch('/api/auth/me', {
-        headers: { Authorization: `Bearer ${token}` },
+    let cancelled = false;
+    // The browser sends the HttpOnly authentication cookie automatically.
+    fetch('/api/auth/me', { credentials: 'same-origin' })
+      .then((res) => {
+        if (!res.ok) throw new Error('Not authenticated');
+        return res.json();
       })
-        .then((res) => {
-          if (res.ok) return res.json();
-          throw new Error('Token expired');
-        })
-        .then((data) => {
-          setUser(data.user);
-        })
-        .catch(() => {
-          localStorage.removeItem('malasban_token');
-          setToken(null);
-          setUser(null);
-        })
-        .finally(() => setIsLoading(false));
-    } else {
-      setIsLoading(false);
-    }
-  }, [token]);
+      .then((data) => { if (!cancelled) { setUser(data.user); setToken('cookie-session'); } })
+      .catch(() => { if (!cancelled) setUser(null); })
+      .finally(() => { if (!cancelled) setIsLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
 
   const login = async (identifier: string, pass: string): Promise<boolean> => {
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ identifier, password: pass }),
       });
@@ -58,8 +50,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         showToast(data.message || 'ورود ناموفق بود', 'error');
         return false;
       }
-      localStorage.setItem('malasban_token', data.token);
-      setToken(data.token);
+      localStorage.removeItem('malasban_token');
+      setToken('cookie-session');
       setUser(data.user);
       showToast(`خوش آمدید ${data.user.name} عزیز`, 'success');
       return true;
@@ -79,6 +71,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const res = await fetch('/api/auth/register', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, family, mobile, email, password: pass }),
       });
@@ -87,8 +80,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         showToast(data.message || 'ثبت‌نام ناموفق بود', 'error');
         return false;
       }
-      localStorage.setItem('malasban_token', data.token);
-      setToken(data.token);
+      localStorage.removeItem('malasban_token');
+      setToken('cookie-session');
       setUser(data.user);
       showToast('ثبت‌نام با موفقیت انجام شد.', 'success');
       return true;
@@ -101,6 +94,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const logout = () => {
     localStorage.removeItem('malasban_token');
     localStorage.removeItem('malasban_conv_id');
+    void fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
     setToken(null);
     setUser(null);
     if (typeof window !== 'undefined') {
@@ -114,6 +108,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const res = await fetch('/api/auth/profile', {
         method: 'PUT',
+        credentials: 'same-origin',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,

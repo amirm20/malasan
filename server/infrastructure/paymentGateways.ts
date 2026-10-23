@@ -22,6 +22,15 @@ export class ZarinPalPaymentGateway implements IPaymentGateway {
   async requestPayment(params: PaymentRequestParams): Promise<PaymentRequestResult> {
     // If merchantId is default dummy or in test mode, return local simulation payment endpoint
     if (!this.merchantId || this.merchantId === '00000000-0000-0000-0000-000000000000') {
+      if (process.env.NODE_ENV === 'production') {
+        return {
+          isSuccess: false,
+          gatewayName: this.gatewayName,
+          authority: '',
+          paymentUrl: '',
+          errorMessage: 'درگاه پرداخت در محیط عملیاتی پیکربندی نشده است.',
+        };
+      }
       const simulatedAuthority = `ZP_SIM_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
       return {
         isSuccess: true,
@@ -85,8 +94,15 @@ export class ZarinPalPaymentGateway implements IPaymentGateway {
   }
 
   async verifyPayment(params: PaymentVerifyParams): Promise<PaymentVerifyResult> {
-    // Simulator handling
+    // Simulator is development-only and the API must verify that the authority
+    // was issued for this exact order before calling this method.
     if (params.authority.startsWith('ZP_SIM_')) {
+      if (process.env.NODE_ENV === 'production') {
+        return { isSuccess: false, gatewayName: this.gatewayName, refId: '', code: -1, message: 'پرداخت شبیه‌سازی‌شده در محیط عملیاتی مجاز نیست.' };
+      }
+      if (params.status === 'NOK') {
+        return { isSuccess: false, gatewayName: this.gatewayName, refId: '', code: -2, message: 'پرداخت توسط کاربر لغو شد.' };
+      }
       const refId = `REF-${Math.floor(10000000 + Math.random() * 90000000)}`;
       return {
         isSuccess: true,

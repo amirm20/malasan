@@ -149,6 +149,7 @@ export interface Order {
   paymentStatus: PaymentStatus;
   paymentMethod: string; // "درگاه بانکی شاپرک" | "کارت به کارت"
   paymentRefId?: string;
+  paymentAuthority?: string;
   customerNotes?: string;
   adminNotes?: string;
   createdAt: string;

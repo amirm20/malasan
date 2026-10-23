@@ -15,10 +15,10 @@ import { db } from '../infrastructure/db.js';
 import {
   hashPassword,
   verifyPassword,
-  generateToken,
-  verifyToken,
-  TokenPayload,
+  AuthenticatedUser,
 } from '../infrastructure/auth.js';
+import { SESSION_COOKIE, createSession, getSessionUserId, revokeSession } from '../infrastructure/sessions.js';
+import { getPgPool } from '../infrastructure/pgRepository.js';
 import { ZarinPalPaymentGateway } from '../infrastructure/paymentGateways.js';
 import { IPaymentGateway } from '../domain/interfaces.js';
 
@@ -29,33 +29,131 @@ import path from 'path';
 
 export const apiRouter = Router();
 
+// Basic per-process rate limit for credential endpoints. Use a shared store (e.g.
+// Redis) if deploying multiple instances.
+const authAttempts = new Map<string, { count: number; resetAt: number }>();
+function authRateLimit(req: Request, res: Response, next: NextFunction) {
+  const key = `${req.ip || 'unknown'}:${req.path}`;
+  const now = Date.now();
+  if (authAttempts.size > 10_000) {
+    for (const [storedKey, value] of authAttempts) {
+      if (value.resetAt <= now) authAttempts.delete(storedKey);
+    }
+  }
+  const current = authAttempts.get(key);
+  if (!current || current.resetAt <= now) {
+    authAttempts.set(key, { count: 1, resetAt: now + 15 * 60 * 1000 });
+    return next();
+  }
+  current.count += 1;
+  if (current.count > 10) {
+    res.setHeader('Retry-After', String(Math.ceil((current.resetAt - now) / 1000)));
+    return res.status(429).json({ message: 'تعداد تلاش‌ها بیش از حد مجاز است. کمی بعد دوباره تلاش کنید.' });
+  }
+  next();
+}
+
 // Payment gateway abstraction instance
-const paymentGateway: IPaymentGateway = new ZarinPalPaymentGateway();
+const paymentGateway: IPaymentGateway = new ZarinPalPaymentGateway(undefined, process.env.NODE_ENV !== 'production');
 
 // Auth Middleware
 export interface AuthRequest extends Request {
-  user?: TokenPayload;
+  user?: AuthenticatedUser;
 }
 
-export function authMiddleware(req: AuthRequest, res: Response, next: NextFunction) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ message: 'لطفاً ابتدا وارد حساب کاربری خود شوید.' });
-  }
+const isProduction = process.env.NODE_ENV === 'production';
 
-  const token = authHeader.split(' ')[1];
-  const payload = verifyToken(token);
-  if (!payload) {
-    return res.status(401).json({ message: 'توکن احراز هویت نامعتبر یا منقضی شده است.' });
-  }
+function setAuthCookie(res: Response, token: string) {
+  const parts = [
+    `${SESSION_COOKIE}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    'Max-Age=28800',
+  ];
+  if (isProduction) parts.push('Secure');
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
 
-  req.user = payload;
-  next();
+function clearAuthCookie(res: Response) {
+  const parts = [`${SESSION_COOKIE}=`, 'Path=/', 'HttpOnly', 'SameSite=Lax', 'Max-Age=0'];
+  if (isProduction) parts.push('Secure');
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
+function readCookie(req: Request, name: string): string | null {
+  const header = req.headers.cookie;
+  if (!header) return null;
+  for (const part of header.split(';')) {
+    const index = part.indexOf('=');
+    if (index < 0) continue;
+    if (part.slice(0, index).trim() === name) {
+      try { return decodeURIComponent(part.slice(index + 1).trim()); } catch { return null; }
+    }
+  }
+  return null;
+}
+
+export async function authMiddleware(req: AuthRequest, res: Response, next: NextFunction) {
+  try {
+    const sessionId = readCookie(req, SESSION_COOKIE);
+    if (!sessionId) {
+      return res.status(401).json({ message: 'لطفاً ابتدا وارد حساب کاربری خود شوید.' });
+    }
+    const userId = await getSessionUserId(sessionId);
+    if (!userId) {
+      clearAuthCookie(res);
+      return res.status(401).json({ message: 'نشست شما منقضی شده است. دوباره وارد شوید.' });
+    }
+    const currentUser = db.users.find((user) => user.id === userId);
+    if (!currentUser || !currentUser.isActive) {
+      await revokeSession(sessionId);
+      clearAuthCookie(res);
+      return res.status(401).json({ message: 'حساب کاربری غیرفعال است یا وجود ندارد.' });
+    }
+    req.user = {
+      userId: currentUser.id,
+      email: currentUser.email,
+      role: currentUser.role,
+      isSuperAdmin: currentUser.role === 'SuperAdmin',
+      permissions: currentUser.permissions || [],
+      name: `${currentUser.name} ${currentUser.family}`.trim(),
+    };
+    next();
+  } catch (err) {
+    next(err);
+  }
 }
 
 export function adminGuard(req: AuthRequest, res: Response, next: NextFunction) {
   if (!req.user || (req.user.role !== 'Admin' && req.user.role !== 'SuperAdmin')) {
     return res.status(403).json({ message: 'دسترسی غیرمجاز. فقط مدیران سیستم مجاز هستند.' });
+  }
+  if (req.user.role === 'SuperAdmin') return next();
+
+  const route = req.path.toLowerCase();
+  let required: string | null = null;
+  if (route.includes('/admin/database')) {
+    return res.status(403).json({ message: 'عملیات پایگاه داده فقط برای مدیر ارشد مجاز است.' });
+  } else if (route.includes('/product')) required = 'products';
+  else if (route.includes('/categor')) required = 'categories';
+  else if (route.includes('/order')) required = 'orders';
+  else if (route.includes('/coupon')) required = 'coupons';
+  else if (route.includes('/wholesale')) required = 'wholesale';
+  else if (route.includes('/review')) required = 'reviews';
+  else if (route.includes('/blog')) required = 'blog';
+  else if (route.includes('/setting')) required = 'settings';
+  else if (route.includes('/user')) {
+    if (req.method === 'GET' && req.query.role === 'Customer') required = 'customers';
+    else if (req.method === 'POST' && req.body?.role !== 'Admin' && req.body?.role !== 'SuperAdmin') required = 'customers';
+    else if (req.params.id && db.users.find((u) => u.id === req.params.id)?.role === 'Customer') required = 'customers';
+    else required = 'staff';
+  }
+  else if (route.includes('/chat')) required = 'chat';
+  else if (route.includes('/dashboard') || route.includes('/stats') || route.includes('/analytics')) required = 'overview';
+
+  if (!required || !req.user.permissions?.includes(required)) {
+    return res.status(403).json({ message: 'برای این عملیات مجوز کافی ندارید.' });
   }
   next();
 }
@@ -63,15 +161,22 @@ export function adminGuard(req: AuthRequest, res: Response, next: NextFunction) 
 // ----------------------------------------------------
 // 1. Auth Routes
 // ----------------------------------------------------
-apiRouter.post('/auth/register', (req, res) => {
+apiRouter.post('/auth/register', authRateLimit, async (req, res) => {
   try {
     const { name, family, email, mobile, password } = req.body;
-    if (!name || !mobile || !password) {
+    if (typeof name !== 'string' || !name.trim() || typeof mobile !== 'string' || !mobile.trim() || typeof password !== 'string') {
       return res.status(400).json({ message: 'لطفاً نام، شماره موبایل و رمز عبور را وارد نمایید.' });
     }
+    if (typeof password !== 'string' || password.length < 12 || password.length > 128) {
+      return res.status(400).json({ message: 'رمز عبور باید حداقل ۱۲ و حداکثر ۱۲۸ نویسه باشد.' });
+    }
 
+    const normalizedMobile = String(mobile).trim();
+    const normalizedEmail = typeof email === 'string' && email.trim()
+      ? email.trim().toLowerCase()
+      : `${normalizedMobile}@no-email.malasban.invalid`;
     const existingUser = db.users.find(
-      (u) => (email && u.email?.toLowerCase() === email.toLowerCase()) || u.mobile === mobile
+      (u) => u.mobile === normalizedMobile || (typeof email === 'string' && Boolean(email.trim()) && u.email?.toLowerCase() === normalizedEmail)
     );
     if (existingUser) {
       return res.status(400).json({ message: 'کاربری با این شماره موبایل یا ایمیل قبلاً ثبت نام کرده است.' });
@@ -82,8 +187,8 @@ apiRouter.post('/auth/register', (req, res) => {
       id: `usr-${Date.now()}`,
       name: name.trim(),
       family: (family || '').trim(),
-      email: (email || '').trim().toLowerCase(),
-      mobile: mobile.trim(),
+      email: normalizedEmail,
+      mobile: normalizedMobile,
       passwordHash: auth.hash,
       salt: auth.salt,
       role: 'Customer' as const,
@@ -96,25 +201,26 @@ apiRouter.post('/auth/register', (req, res) => {
     db.users.push(newUser);
     db.persist();
 
-    const token = generateToken(newUser);
+    const sessionId = await createSession(newUser.id);
     const { passwordHash, salt, ...safeUser } = newUser;
 
-    res.status(201).json({ user: safeUser, token });
+    setAuthCookie(res, sessionId);
+    res.status(201).json({ user: safeUser });
   } catch (err: any) {
-    res.status(500).json({ message: err?.message || 'خطای سرور' });
+    res.status(500).json({ message: (process.env.NODE_ENV === 'production' ? 'خطای غیرمنتظره در سرور' : err?.message || 'خطای سرور') });
   }
 });
 
-apiRouter.post('/auth/login', (req, res) => {
+apiRouter.post('/auth/login', authRateLimit, async (req, res) => {
   try {
     const { identifier, password } = req.body; // mobile or email
-    if (!identifier || !password) {
-      return res.status(400).json({ message: 'لطفاً شماره موبایل/ایمیل و رمز عبور را وارد نمایید.' });
+    if (typeof identifier !== 'string' || typeof password !== 'string' || !identifier.trim() || !password || password.length > 128) {
+      return res.status(400).json({ message: 'لطفاً شماره موبایل/ایمیل و رمز عبور معتبر را وارد نمایید.' });
     }
 
     const cleanId = identifier.trim().toLowerCase();
     const user = db.users.find(
-      (u) => u.mobile === cleanId || u.email.toLowerCase() === cleanId
+      (u) => u.mobile === cleanId || u.email?.toLowerCase() === cleanId
     );
 
     if (!user || !user.isActive) {
@@ -126,12 +232,24 @@ apiRouter.post('/auth/login', (req, res) => {
       return res.status(401).json({ message: 'نام کاربری یا رمز عبور اشتباه است.' });
     }
 
-    const token = generateToken(user);
+    const sessionId = await createSession(user.id);
     const { passwordHash, salt, ...safeUser } = user;
 
-    res.json({ user: safeUser, token });
+    setAuthCookie(res, sessionId);
+    res.json({ user: safeUser });
   } catch (err: any) {
-    res.status(500).json({ message: err?.message || 'خطای سرور' });
+    res.status(500).json({ message: (process.env.NODE_ENV === 'production' ? 'خطای غیرمنتظره در سرور' : err?.message || 'خطای سرور') });
+  }
+});
+
+apiRouter.post('/auth/logout', async (req, res, next) => {
+  try {
+    const sessionId = readCookie(req, SESSION_COOKIE);
+    if (sessionId) await revokeSession(sessionId);
+    clearAuthCookie(res);
+    res.status(204).end();
+  } catch (err) {
+    next(err);
   }
 });
 
@@ -226,7 +344,7 @@ apiRouter.post('/products', authMiddleware, adminGuard, (req, res) => {
     const newProduct = ProductService.create(req.body);
     res.status(201).json(newProduct);
   } catch (err: any) {
-    res.status(400).json({ message: err?.message || 'خطا در ثبت محصول' });
+    res.status(400).json({ message: (process.env.NODE_ENV === 'production' ? 'خطای غیرمنتظره در سرور' : err?.message || 'خطا در ثبت محصول') });
   }
 });
 
@@ -245,10 +363,7 @@ apiRouter.delete('/products/:id', authMiddleware, adminGuard, (req, res) => {
 // ----------------------------------------------------
 // 3. Categories
 // ----------------------------------------------------
-apiRouter.get('/categories', (req, res) => {
-  if (req.query.all === 'true') {
-    return res.json(CategoryService.getAllAdmin());
-  }
+apiRouter.get('/categories', (_req, res) => {
   res.json(CategoryService.getAll());
 });
 
@@ -261,7 +376,7 @@ apiRouter.post('/categories', authMiddleware, adminGuard, (req, res) => {
     const cat = CategoryService.create(req.body);
     res.status(201).json(cat);
   } catch (err: any) {
-    res.status(400).json({ message: err?.message || 'خطا در ثبت دسته‌بندی' });
+    res.status(400).json({ message: (process.env.NODE_ENV === 'production' ? 'خطای غیرمنتظره در سرور' : err?.message || 'خطا در ثبت دسته‌بندی') });
   }
 });
 
@@ -282,70 +397,90 @@ apiRouter.delete('/categories/:id', authMiddleware, adminGuard, (req, res) => {
 // ----------------------------------------------------
 // 4. Orders & Checkout
 // ----------------------------------------------------
-apiRouter.post('/orders', (req, res) => {
+apiRouter.post('/orders', authRateLimit, authMiddleware, (req: AuthRequest, res) => {
   try {
     const {
-      userId,
       customerName,
       customerMobile,
       customerEmail,
       shippingAddress,
       shippingMethod,
-      shippingFee,
-      items,
-      subtotal,
-      discountAmount,
+      items: requestedItems,
       couponCode,
-      totalAmount,
       paymentMethod,
       customerNotes,
     } = req.body;
 
-    if (!customerName || !customerMobile || !shippingAddress || !items || items.length === 0) {
+    if (!customerName || !customerMobile || !shippingAddress || !Array.isArray(requestedItems) || requestedItems.length === 0 || requestedItems.length > 50) {
       return res.status(400).json({ message: 'اطلاعات سفارش یا سبد خرید ناقص است.' });
     }
-
-    // Verify firstOrderOnly coupon constraint if coupon applied
-    if (couponCode) {
-      const cleanCode = couponCode.trim().toUpperCase();
-      const coupon = db.coupons.find((c) => c.code.toUpperCase() === cleanCode);
-      if (coupon && coupon.firstOrderOnly) {
-        const cleanMobile = customerMobile.replace(/[^0-9]/g, '');
-        const hasExistingOrder = db.orders.some((o) => {
-          if (o.status === 'Cancelled') return false;
-          if (userId && o.userId === userId) return true;
-          if (cleanMobile && o.customerMobile.replace(/[^0-9]/g, '') === cleanMobile) return true;
-          return false;
-        });
-
-        if (hasExistingOrder) {
-          return res.status(400).json({
-            message: 'کد تخفیف استفاده شده فقط برای اولین خرید مجاز است و برای این شماره یا حساب کاربری قبلاً سفارشی ثبت شده است.',
-          });
-        }
-      }
+    if (typeof shippingAddress !== 'object' || !shippingAddress.fullAddress || !shippingAddress.city || !shippingAddress.province) {
+      return res.status(400).json({ message: 'نشانی ارسال معتبر نیست.' });
     }
 
+    // Never trust prices, totals, stock, or shipping fees supplied by the browser.
+    const items = [];
+    for (let i = 0; i < requestedItems.length; i++) {
+      const requested = requestedItems[i];
+      const quantity = Number(requested?.quantity);
+      if (!requested?.productId || !Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
+        return res.status(400).json({ message: 'تعداد یا شناسه یکی از محصولات نامعتبر است.' });
+      }
+      const product = db.products.find((p) => p.id === requested.productId && p.isActive);
+      if (!product) return res.status(400).json({ message: 'یکی از محصولات دیگر در دسترس نیست.' });
+      if (product.stockQuantity < quantity) return res.status(409).json({ message: `موجودی محصول «${product.name}» کافی نیست.` });
+      const unitPrice = product.discountPrice ?? product.price;
+      items.push({
+        id: `item-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`,
+        productId: product.id,
+        productName: product.name,
+        sku: product.sku,
+        productImage: product.mainImage || product.images?.[0] || '',
+        weightGrams: product.weightGrams,
+        quantity,
+        unitPrice,
+        discountAmount: 0,
+        totalPrice: unitPrice * quantity,
+      });
+    }
+
+    const subtotal = items.reduce((sum, item) => sum + item.totalPrice, 0);
+    let discountAmount = 0;
+    let appliedCouponCode: string | undefined;
+    if (couponCode) {
+      const validation = CouponService.validate(String(couponCode), subtotal, {
+        userId: req.user?.userId,
+        mobile: String(customerMobile),
+      });
+      if (!validation.valid) return res.status(400).json({ message: validation.message });
+      discountAmount = Math.min(subtotal, validation.discount);
+      appliedCouponCode = validation.coupon?.code;
+    }
+    const shippingFee = subtotal >= db.settings.freeShippingThreshold
+      ? 0
+      : db.settings.standardShippingFee;
+    const totalAmount = Math.max(0, subtotal - discountAmount + shippingFee);
+
     const order = OrderService.create({
-      userId,
-      customerName,
-      customerMobile,
-      customerEmail,
+      userId: req.user?.userId,
+      customerName: String(customerName).trim(),
+      customerMobile: String(customerMobile).trim(),
+      customerEmail: customerEmail ? String(customerEmail).trim() : undefined,
       shippingAddress,
       shippingMethod: shippingMethod || 'پست پیشتاز',
-      shippingFee: shippingFee ?? 45000,
+      shippingFee,
       items,
       subtotal,
-      discountAmount: discountAmount || 0,
-      couponCode,
+      discountAmount,
+      couponCode: appliedCouponCode,
       totalAmount,
       paymentMethod: paymentMethod || 'درگاه بانکی شاپرک',
-      customerNotes,
+      customerNotes: customerNotes ? String(customerNotes).slice(0, 1000) : undefined,
     });
 
-    res.status(201).json(order);
+    res.status(201).json({ order });
   } catch (err: any) {
-    res.status(500).json({ message: err?.message || 'خطا در ثبت سفارش' });
+    res.status(500).json({ message: (process.env.NODE_ENV === 'production' ? 'خطای غیرمنتظره در سرور' : err?.message || 'خطا در ثبت سفارش') });
   }
 });
 
@@ -359,9 +494,13 @@ apiRouter.get('/orders', authMiddleware, (req: AuthRequest, res) => {
   res.json(orders);
 });
 
-apiRouter.get('/orders/:id', (req, res) => {
+apiRouter.get('/orders/:id', authMiddleware, (req: AuthRequest, res) => {
   const order = OrderService.getById(req.params.id);
   if (!order) return res.status(404).json({ message: 'سفارش یافت نشد.' });
+  const isAdmin = req.user?.role === 'Admin' || req.user?.role === 'SuperAdmin';
+  if (!isAdmin && order.userId !== req.user?.userId) {
+    return res.status(403).json({ message: 'دسترسی به این سفارش مجاز نیست.' });
+  }
   res.json(order);
 });
 
@@ -385,13 +524,16 @@ apiRouter.patch('/orders/:id/status', authMiddleware, adminGuard, (req, res) => 
 // ----------------------------------------------------
 // 5. Payment Gateway (Abstract IPaymentGateway)
 // ----------------------------------------------------
-apiRouter.post('/payment/request', async (req, res) => {
+apiRouter.post('/payment/request', authRateLimit, authMiddleware, async (req: AuthRequest, res) => {
   try {
     const { orderId } = req.body;
     const order = OrderService.getById(orderId);
     if (!order) return res.status(404).json({ message: 'سفارش یافت نشد.' });
+    const isAdmin = req.user?.role === 'Admin' || req.user?.role === 'SuperAdmin';
+    if (!isAdmin && order.userId !== req.user?.userId) return res.status(403).json({ message: 'دسترسی به این سفارش مجاز نیست.' });
+    if (order.paymentStatus === 'Successful') return res.status(409).json({ message: 'این سفارش قبلاً پرداخت شده است.' });
 
-    const appUrl = process.env.APP_URL || `http://${req.headers.host}`;
+    const appUrl = process.env.APP_URL || 'http://localhost:3000';
     const result = await paymentGateway.requestPayment({
       orderId: order.id,
       orderNumber: order.orderNumber,
@@ -402,67 +544,98 @@ apiRouter.post('/payment/request', async (req, res) => {
       callbackUrl: `${appUrl}/checkout/payment-verify`,
     });
 
+    if (result.isSuccess && result.authority) {
+      order.paymentAuthority = result.authority;
+      let saved = await getPgPool().query(
+        `UPDATE orders SET payment_authority = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND payment_status <> 'Successful'`,
+        [result.authority, order.id]
+      );
+      if (!saved.rowCount) {
+        const synced = await syncSchemaToPostgres(db.getFullSchema());
+        if (!synced.success) throw new Error(synced.error || 'Could not persist the order before payment.');
+        saved = await getPgPool().query(
+          `UPDATE orders SET payment_authority = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND payment_status <> 'Successful'`,
+          [result.authority, order.id]
+        );
+      }
+      if (!saved.rowCount) throw new Error('Could not persist payment authority for the order.');
+      db.persist();
+    }
     res.json(result);
   } catch (err: any) {
-    res.status(500).json({ message: err?.message || 'خطا در اتصال به درگاه پرداخت' });
+    res.status(500).json({ message: (process.env.NODE_ENV === 'production' ? 'خطای غیرمنتظره در سرور' : err?.message || 'خطا در اتصال به درگاه پرداخت') });
   }
 });
 
-apiRouter.post('/payment/verify', async (req, res) => {
+apiRouter.post('/payment/verify', authRateLimit, authMiddleware, async (req: AuthRequest, res) => {
   try {
-    const { authority, orderId } = req.body;
-    const order = OrderService.getById(orderId);
-    if (!order) return res.status(404).json({ message: 'سفارش یافت نشد.' });
+    const { authority, orderId, status } = req.body;
+    if (typeof authority !== 'string' || !authority.trim()) return res.status(400).json({ message: 'شناسه پرداخت نامعتبر است.' });
+    const order = orderId
+      ? OrderService.getById(String(orderId))
+      : db.orders.find((candidate) => candidate.paymentAuthority === authority);
+    if (!order) return res.status(404).json({ message: 'سفارش یا درخواست پرداخت یافت نشد.' });
+    const isAdmin = req.user?.role === 'Admin' || req.user?.role === 'SuperAdmin';
+    if (!isAdmin && order.userId !== req.user?.userId) return res.status(403).json({ message: 'دسترسی به این سفارش مجاز نیست.' });
+    if (order.paymentStatus === 'Successful') return res.status(409).json({ message: 'این سفارش قبلاً پرداخت شده است.' });
+    if (!order.paymentAuthority || order.paymentAuthority !== authority) {
+      return res.status(400).json({ message: 'شناسه پرداخت به این سفارش تعلق ندارد یا منقضی شده است.' });
+    }
 
     const result = await paymentGateway.verifyPayment({
       authority,
       amountTomans: order.totalAmount,
+      status: status === 'NOK' ? 'NOK' : 'OK',
     });
 
     if (result.isSuccess) {
+      const updated = await getPgPool().query(
+        `UPDATE orders SET payment_status = 'Successful', status = 'Paid',
+          payment_ref_id = $1, payment_authority = NULL, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2 AND payment_authority = $3 AND payment_status <> 'Successful' RETURNING id`,
+        [result.refId, order.id, authority]
+      );
+      if (!updated.rowCount) return res.status(409).json({ message: 'درخواست پرداخت قبلاً پردازش شده است.' });
       order.paymentStatus = 'Successful';
       order.status = 'Paid';
       order.paymentRefId = result.refId;
-      order.updatedAt = new Date().toISOString();
-      db.persist();
     } else {
+      await getPgPool().query(
+        `UPDATE orders SET payment_status = 'Failed', payment_authority = NULL, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND payment_authority = $2 AND payment_status <> 'Successful'`,
+        [order.id, authority]
+      );
       order.paymentStatus = 'Failed';
-      order.updatedAt = new Date().toISOString();
-      db.persist();
     }
+    order.paymentAuthority = undefined;
+    order.updatedAt = new Date().toISOString();
+    db.persist();
 
-    res.json({ ...result, order });
+    res.json({ success: result.isSuccess, orderId: order.id, ...result, order });
   } catch (err: any) {
-    res.status(500).json({ message: err?.message || 'خطا در تأیید تراکنش' });
+    res.status(500).json({ message: (process.env.NODE_ENV === 'production' ? 'خطای غیرمنتظره در سرور' : err?.message || 'خطا در تأیید تراکنش') });
   }
 });
 
 // ----------------------------------------------------
 // 6. Coupons
 // ----------------------------------------------------
-apiRouter.post('/coupons/validate', (req, res) => {
+apiRouter.post('/coupons/validate', authRateLimit, async (req, res, next) => {
   const { code, cartTotal, mobile, userId } = req.body;
   if (!code) return res.status(400).json({ valid: false, message: 'کد تخفیف را وارد کنید.' });
 
-  let effectiveUserId = userId;
-  let effectiveMobile = mobile;
-
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.split(' ')[1];
-    const payload = verifyToken(token);
-    if (payload?.userId) {
-      effectiveUserId = payload.userId;
-      const user = db.users.find((u) => u.id === payload.userId);
-      if (user?.mobile) effectiveMobile = user.mobile;
-    }
+  try {
+    const sessionId = readCookie(req, SESSION_COOKIE);
+    const sessionUserId = sessionId ? await getSessionUserId(sessionId) : null;
+    const user = sessionUserId ? db.users.find((u) => u.id === sessionUserId && u.isActive) : undefined;
+    const result = CouponService.validate(String(code), Number(cartTotal) || 0, {
+      userId: user?.id,
+      mobile: user?.mobile || (typeof mobile === 'string' ? mobile : undefined),
+    });
+    res.json(result);
+  } catch (err) {
+    next(err);
   }
-
-  const result = CouponService.validate(code, cartTotal || 0, {
-    userId: effectiveUserId,
-    mobile: effectiveMobile,
-  });
-  res.json(result);
 });
 
 apiRouter.get('/coupons', authMiddleware, adminGuard, (req, res) => {
@@ -533,7 +706,7 @@ apiRouter.post('/wholesale', (req, res) => {
       message: 'درخواست همکاری عمده شما با موفقیت ثبت شد. کارشناسان ما ظرف ۲۴ ساعت آینده با شما تماس خواهند گرفت.',
     });
   } catch (err: any) {
-    res.status(500).json({ message: err?.message || 'خطا در ثبت درخواست عمده' });
+    res.status(500).json({ message: (process.env.NODE_ENV === 'production' ? 'خطای غیرمنتظره در سرور' : err?.message || 'خطا در ثبت درخواست عمده') });
   }
 });
 
@@ -592,19 +765,13 @@ apiRouter.delete('/admin/wholesale/:id', authMiddleware, adminGuard, (req, res) 
 // 8. Reviews
 // ----------------------------------------------------
 apiRouter.get('/reviews', (req, res) => {
-  const { productId, productSlug, all } = req.query;
-  const includeAll = all === 'true';
-  if (productId) {
-    return res.json(ReviewService.getForProduct(String(productId), includeAll));
-  }
+  const { productId, productSlug } = req.query;
+  if (productId) return res.json(ReviewService.getForProduct(String(productId), false));
   if (productSlug) {
     const prod = ProductService.getByIdOrSlug(String(productSlug));
-    if (prod) {
-      return res.json(ReviewService.getForProduct(prod.id, includeAll));
-    }
-    return res.json([]);
+    return res.json(prod ? ReviewService.getForProduct(prod.id, false) : []);
   }
-  res.json(ReviewService.getAll());
+  res.json(ReviewService.getAll().filter((review) => review.isApproved));
 });
 
 apiRouter.get('/admin/reviews', authMiddleware, adminGuard, (req, res) => {
@@ -612,12 +779,11 @@ apiRouter.get('/admin/reviews', authMiddleware, adminGuard, (req, res) => {
 });
 
 apiRouter.get('/reviews/product/:productId', (req, res) => {
-  const includeAll = req.query.all === 'true';
-  res.json(ReviewService.getForProduct(req.params.productId, includeAll));
+  res.json(ReviewService.getForProduct(req.params.productId, false));
 });
 
-apiRouter.post('/reviews', (req, res) => {
-  const { productId, userName, rating, comment, userId, isOfficialStaff, isApproved, adminReply } = req.body;
+apiRouter.post('/reviews', authRateLimit, async (req, res, next) => {
+  const { productId, userName, rating, comment, isOfficialStaff, isApproved, adminReply } = req.body;
   if (!productId || rating === undefined || !comment) {
     return res.status(400).json({ message: 'لطفاً امتیاز و نظر خود را وارد نمایید.' });
   }
@@ -627,30 +793,26 @@ apiRouter.post('/reviews', (req, res) => {
     return res.status(400).json({ message: 'امتیاز باید عددی بین ۱ تا ۵ باشد.' });
   }
 
-  // Security: only authenticated Admin/SuperAdmin can set isOfficialStaff or pre-approve reviews
-  let staff = false;
-  let approved = false;
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.split(' ')[1];
-    const payload = verifyToken(token);
-    if (payload && (payload.role === 'Admin' || payload.role === 'SuperAdmin')) {
-      staff = Boolean(isOfficialStaff);
-      approved = isApproved !== undefined ? Boolean(isApproved) : true;
-    }
+  try {
+    const sessionId = readCookie(req, SESSION_COOKIE);
+    const sessionUserId = sessionId ? await getSessionUserId(sessionId) : null;
+    const currentUser = sessionUserId ? db.users.find((u) => u.id === sessionUserId && u.isActive) : undefined;
+    const staff = Boolean(currentUser && (currentUser.role === 'SuperAdmin' || (currentUser.role === 'Admin' && currentUser.permissions?.includes('reviews'))));
+    const approved = staff && isApproved !== undefined ? Boolean(isApproved) : false;
+    const review = ReviewService.submit({
+      productId,
+      userName: currentUser ? `${currentUser.name} ${currentUser.family}`.trim() : (userName || 'کاربر مهمان'),
+      rating: numRating,
+      comment: String(comment).trim().slice(0, 5000),
+      userId: currentUser?.id,
+      isOfficialStaff: staff && Boolean(isOfficialStaff),
+      isApproved: approved,
+      adminReply: staff ? adminReply : undefined,
+    });
+    res.status(201).json({ success: true, review, ...review });
+  } catch (err) {
+    next(err);
   }
-
-  const review = ReviewService.submit({
-    productId,
-    userName: userName || 'کاربر مهمان',
-    rating: numRating,
-    comment: String(comment).trim(),
-    userId,
-    isOfficialStaff: staff,
-    isApproved: approved,
-    adminReply: staff ? adminReply : undefined,
-  });
-  res.status(201).json({ success: true, review, ...review });
 });
 
 apiRouter.get('/reviews/admin', authMiddleware, adminGuard, (req, res) => {
@@ -732,7 +894,7 @@ apiRouter.put('/settings', authMiddleware, adminGuard, (req: AuthRequest, res: R
     res.json(updated);
   } catch (err: any) {
     console.error('Settings update error in server:', err);
-    res.status(500).json({ message: err?.message || 'خطا در ذخیره تنظیمات در پایگاه داده' });
+    res.status(500).json({ message: (process.env.NODE_ENV === 'production' ? 'خطای غیرمنتظره در سرور' : err?.message || 'خطا در ذخیره تنظیمات در پایگاه داده') });
   }
 });
 
@@ -742,7 +904,7 @@ apiRouter.put('/admin/settings', authMiddleware, adminGuard, (req: AuthRequest, 
     res.json(updated);
   } catch (err: any) {
     console.error('Admin settings update error in server:', err);
-    res.status(500).json({ message: err?.message || 'خطا در ذخیره تنظیمات' });
+    res.status(500).json({ message: (process.env.NODE_ENV === 'production' ? 'خطای غیرمنتظره در سرور' : err?.message || 'خطا در ذخیره تنظیمات') });
   }
 });
 
@@ -824,8 +986,11 @@ apiRouter.get('/admin/users', authMiddleware, adminGuard, (req, res) => {
 apiRouter.post('/admin/users', authMiddleware, adminGuard, (req: AuthRequest, res) => {
   try {
     const { name, family, mobile, email, password, role, permissions, isActive } = req.body;
-    if (!name || !mobile || !password) {
+    if (typeof name !== 'string' || !name.trim() || typeof mobile !== 'string' || !mobile.trim() || typeof password !== 'string') {
       return res.status(400).json({ message: 'نام، شماره موبایل و رمز عبور الزامی هستند.' });
+    }
+    if (typeof password !== 'string' || password.length < 12 || password.length > 128) {
+      return res.status(400).json({ message: 'رمز عبور باید حداقل ۱۲ و حداکثر ۱۲۸ نویسه باشد.' });
     }
 
     // Role-based permission check: only SuperAdmin can create Staff/Admins
@@ -853,8 +1018,8 @@ apiRouter.post('/admin/users', authMiddleware, adminGuard, (req: AuthRequest, re
       id: `usr-${Date.now()}`,
       name: name.trim(),
       family: (family || '').trim(),
-      mobile: mobile.trim(),
-      email: (email || '').trim().toLowerCase(),
+      mobile: String(mobile).trim(),
+      email: typeof email === 'string' && email.trim() ? email.trim().toLowerCase() : `${String(mobile).trim()}@no-email.malasban.invalid`,
       passwordHash: auth.hash,
       salt: auth.salt,
       role: targetRole,
@@ -872,7 +1037,7 @@ apiRouter.post('/admin/users', authMiddleware, adminGuard, (req: AuthRequest, re
     const { passwordHash, salt, ...safeUser } = newUser;
     res.status(201).json(safeUser);
   } catch (err: any) {
-    res.status(500).json({ message: err?.message || 'خطا در ایجاد کاربر' });
+    res.status(500).json({ message: (process.env.NODE_ENV === 'production' ? 'خطای غیرمنتظره در سرور' : err?.message || 'خطا در ایجاد کاربر') });
   }
 });
 
@@ -883,6 +1048,16 @@ apiRouter.put('/admin/users/:id', authMiddleware, adminGuard, (req: AuthRequest,
 
     const { name, family, mobile, email, password, role, permissions, isActive } = req.body;
     const isCallerSuperAdmin = req.user?.role === 'SuperAdmin';
+    if (role !== undefined && !['SuperAdmin', 'Admin', 'Customer'].includes(role)) {
+      return res.status(400).json({ message: 'نقش کاربری نامعتبر است.' });
+    }
+    const allowedPermissions = ['overview','products','orders','wholesale','reviews','categories','coupons','customers','staff','blog','settings','chat'];
+    if (permissions !== undefined && (!Array.isArray(permissions) || permissions.some((perm: unknown) => typeof perm !== 'string' || !allowedPermissions.includes(perm)))) {
+      return res.status(400).json({ message: 'فهرست مجوزهای کاربری نامعتبر است.' });
+    }
+    if (password !== undefined && (typeof password !== 'string' || password.length < 12 || password.length > 128)) {
+      return res.status(400).json({ message: 'رمز عبور جدید باید حداقل ۱۲ و حداکثر ۱۲۸ نویسه باشد.' });
+    }
 
     // If altering roles or permissions or editing another admin, ensure caller is SuperAdmin
     if (role !== undefined || permissions !== undefined) {
@@ -907,7 +1082,7 @@ apiRouter.put('/admin/users/:id', authMiddleware, adminGuard, (req: AuthRequest,
       user.permissions = permissions;
     }
 
-    if (password && password.trim().length >= 6) {
+    if (typeof password === 'string' && password.length >= 12) {
       const auth = hashPassword(password);
       user.passwordHash = auth.hash;
       user.salt = auth.salt;
@@ -919,7 +1094,7 @@ apiRouter.put('/admin/users/:id', authMiddleware, adminGuard, (req: AuthRequest,
     const { passwordHash, salt, ...safeUser } = user;
     res.json(safeUser);
   } catch (err: any) {
-    res.status(500).json({ message: err?.message || 'خطا در ویرایش کاربر' });
+    res.status(500).json({ message: (process.env.NODE_ENV === 'production' ? 'خطای غیرمنتظره در سرور' : err?.message || 'خطا در ویرایش کاربر') });
   }
 });
 

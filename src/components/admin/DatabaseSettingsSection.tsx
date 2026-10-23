@@ -31,7 +31,7 @@ export const DatabaseSettingsSection: React.FC<DatabaseSettingsSectionProps> = (
     try {
       const res = await fetch('/api/admin/database/status', {
         headers: {
-          Authorization: `Bearer ${token || localStorage.getItem('malasban_token') || ''}`,
+          
         },
       });
       if (res.ok) {
@@ -57,7 +57,7 @@ export const DatabaseSettingsSection: React.FC<DatabaseSettingsSectionProps> = (
       const res = await fetch('/api/admin/database/migrate', {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${token || localStorage.getItem('malasban_token') || ''}`,
+          
         },
       });
       const data = await res.json();
@@ -80,7 +80,7 @@ export const DatabaseSettingsSection: React.FC<DatabaseSettingsSectionProps> = (
       const res = await fetch('/api/admin/database/seed', {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${token || localStorage.getItem('malasban_token') || ''}`,
+          
         },
       });
       const data = await res.json();
@@ -103,7 +103,7 @@ export const DatabaseSettingsSection: React.FC<DatabaseSettingsSectionProps> = (
       const res = await fetch('/api/admin/database/sync', {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${token || localStorage.getItem('malasban_token') || ''}`,
+          
         },
       });
       const data = await res.json();
